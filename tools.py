@@ -195,17 +195,20 @@ def get_semester_courses(semester: int) -> str:
 
 #get remaining credit hours
 @tool
-def get_remaining_credit_hours(current_semester: int) -> float:
-    """Use this to total the graded credit hours across all semesters after the
-    student's current one, up to semester 8.
-
-    Call this when building a multi-semester plan toward a target CGPA, to know
-    how many credit hours remain for the required-GPA calculation.
+def get_remaining_credit_hours(current_semester: int, through_semester: int = 8) -> float:
+    """Use this to total the graded credit hours from just after current_semester
+    through through_semester (inclusive), for checking one horizon at a time when
+    building a multi-semester plan toward a target CGPA. Defaults to semester 8
+    (everything remaining) if through_semester is not given.
     """
     if current_semester < 1 or current_semester > 8:
         return "Error: current_semester must be between 1 and 8"
+    if through_semester < 1 or through_semester > 8:
+        return "Error: through_semester must be between 1 and 8"
+    if through_semester <= current_semester:
+        return "Error: through_semester must be after current_semester"
     total_credit_hours = 0.0
-    for semester in range(current_semester + 1, 9):
+    for semester in range(current_semester + 1, through_semester + 1):
         for code, name, credit_hours in COURSES[semester]:
             total_credit_hours += credit_hours
     return round(total_credit_hours, 2)
