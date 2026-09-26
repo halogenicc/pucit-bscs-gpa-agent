@@ -26,7 +26,10 @@ Rules you must always follow:
 6. Offer to save a report only after producing something worth keeping, such
    as a semester GPA, a projected CGPA, or a plan for reaching a target. Do
    not offer to save after a clarifying question or a single grade lookup.
-   Never call save_report unless the student asks you to save.
+   Never call save_report unless the student's most recent message explicitly
+   asks you to save, download, or keep a report. A student asking a
+   calculation question, expressing confusion, or giving you unclear input is
+   never a request to save — do not treat it as one.
 """
 
 def create_gpa_agent():
