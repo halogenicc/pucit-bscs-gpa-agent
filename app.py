@@ -1,6 +1,7 @@
 
 import asyncio
 import html
+import re
 import streamlit as st
 
 from dotenv import load_dotenv
@@ -43,6 +44,37 @@ if "thread_id" not in st.session_state:
 
 if "notice" not in st.session_state:
     st.session_state.notice = None
+
+
+# ==========================================
+# TEXT FORMATTING
+# ==========================================
+
+def clean_response(text):
+    """Remove excessive blank lines from model responses."""
+
+    text = str(text)
+
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+
+    cleaned = []
+    previous_blank = False
+
+    for line in lines:
+
+        line = line.rstrip()
+
+        if not line.strip():
+            if cleaned and not previous_blank:
+                cleaned.append("")
+
+            previous_blank = True
+
+        else:
+            cleaned.append(line)
+            previous_blank = False
+
+    return "\n".join(cleaned).strip()
 
 
 # ==========================================
@@ -119,12 +151,13 @@ st.markdown(
     }
 
     .bubble {
-        max-width: 75%;
-        padding: 12px 16px;
+        max-width: 85%;
+        padding: 10px 14px;
         font-size: 15px;
-        line-height: 1.45;
+        line-height: 1.35;
         position: relative;
         word-wrap: break-word;
+        overflow-wrap: anywhere;
         white-space: pre-wrap;
         color: #000000 !important;
     }
@@ -138,6 +171,19 @@ st.markdown(
         background: #6FB3E8;
         border-radius: 18px 18px 4px 18px;
     }
+
+    /* Reduce unnecessary spacing in response text */
+
+    .bubble p {
+        margin-top: 4px;
+        margin-bottom: 4px;
+    }
+
+    .bubble table {
+        margin-top: 5px;
+        margin-bottom: 5px;
+    }
+
     </style>
     """,
     unsafe_allow_html=True,
@@ -154,18 +200,21 @@ def get_message_text(message):
     content = message.content
 
     if isinstance(content, str):
-        return content
+        text = content
 
-    if isinstance(content, list):
+    elif isinstance(content, list):
         parts = []
 
         for block in content:
             if isinstance(block, dict) and block.get("type") == "text":
                 parts.append(block.get("text", ""))
 
-        return "".join(parts)
+        text = "".join(parts)
 
-    return str(content)
+    else:
+        text = str(content)
+
+    return clean_response(text)
 
 
 def convert_messages(messages):
@@ -198,7 +247,7 @@ def convert_messages(messages):
 def render_bubble(role, text):
     """Render a custom chat bubble."""
 
-    safe_text = html.escape(str(text))
+    safe_text = html.escape(clean_response(text))
 
     st.markdown(
         f'<div class="bubble-row {role}">'
@@ -213,7 +262,7 @@ def render_bubble(role, text):
 # ==========================================
 
 async def stream_agent_response(user_text, thread_id):
-    """Connect to the remote MCP server and stream the response."""
+    """Stream assistant tokens and LangGraph execution events."""
 
     config = {
         "configurable": {
@@ -244,6 +293,7 @@ async def stream_agent_response(user_text, thread_id):
                     version="v2"
                 ):
 
+                    # Assistant response tokens
                     if chunk["type"] == "messages":
 
                         message_chunk, metadata = chunk["data"]
@@ -252,10 +302,12 @@ async def stream_agent_response(user_text, thread_id):
 
                             content = message_chunk.content
 
-                            if isinstance(content, str):
+                            if isinstance(content, str) and content:
 
-                                if content:
-                                    yield content
+                                yield {
+                                    "type": "token",
+                                    "content": content
+                                }
 
                             elif isinstance(content, list):
 
@@ -269,18 +321,75 @@ async def stream_agent_response(user_text, thread_id):
                                         text = block.get("text", "")
 
                                         if text:
-                                            yield text
+                                            yield {
+                                                "type": "token",
+                                                "content": text
+                                            }
+
+                    # LangGraph execution updates
+                    elif chunk["type"] == "updates":
+
+                        for node, update in chunk["data"].items():
+
+                            yield {
+                                "type": "node",
+                                "name": node
+                            }
+
+                            if not isinstance(update, dict):
+                                continue
+
+                            messages = update.get("messages", [])
+
+                            if not isinstance(messages, list):
+                                messages = [messages]
+
+                            for message in messages:
+
+                                # Model requested a tool
+                                tool_calls = getattr(
+                                    message,
+                                    "tool_calls",
+                                    []
+                                )
+
+                                for tool_call in tool_calls:
+
+                                    yield {
+                                        "type": "tool_start",
+                                        "name": tool_call.get(
+                                            "name",
+                                            "Unknown tool"
+                                        ),
+                                        "args": tool_call.get(
+                                            "args",
+                                            {}
+                                        )
+                                    }
+
+                                # Tool returned its result
+                                if getattr(message, "type", "") == "tool":
+
+                                    yield {
+                                        "type": "tool_end",
+                                        "name": getattr(
+                                            message,
+                                            "name",
+                                            "Tool"
+                                        ),
+                                        "content": get_message_text(message)
+                                    }
 
     except Exception as error:
 
-        yield (
-            "\n\nSomething went wrong while connecting "
-            f"to the CGPA Guider: {error}"
-        )
+        yield {
+            "type": "error",
+            "content": str(error)
+        }
 
 
 # ==========================================
-# DISPLAY ASYNCHRONOUS STREAM
+# DISPLAY LIVE STREAMING
 # ==========================================
 
 async def display_streamed_response(
@@ -288,24 +397,121 @@ async def display_streamed_response(
     thread_id,
     placeholder
 ):
-    """Consume async response chunks and update the custom bubble."""
+    """Display live agent activity and assistant response."""
 
     response_text = ""
+    failed = False
 
-    async for chunk in stream_agent_response(user_text, thread_id):
+    with st.status(
+        "CGPA Guider is working...",
+        expanded=True
+    ) as status:
 
-        response_text += chunk
+        async for event in stream_agent_response(
+            user_text,
+            thread_id
+        ):
 
-        safe_text = html.escape(response_text)
+            event_type = event["type"]
 
-        placeholder.markdown(
-            f'<div class="bubble-row assistant">'
-            f'<div class="bubble assistant">{safe_text}</div>'
-            f'</div>',
-            unsafe_allow_html=True,
-        )
+            # LangGraph node activity
+            if event_type == "node":
 
-    return response_text
+                node = event["name"]
+
+                if node == "model":
+                    status.write("🧠 Model is processing the request.")
+
+                elif node == "tools":
+                    status.write("🔧 Executing requested tools.")
+
+                else:
+                    status.write(f"⚙️ LangGraph node: `{node}`")
+
+            # Tool started
+            elif event_type == "tool_start":
+
+                tool_name = event["name"]
+
+                status.write(
+                    f"🔧 **Calling tool:** `{tool_name}`"
+                )
+
+                with st.expander(
+                    f"Arguments — {tool_name}"
+                ):
+                    st.json(event["args"])
+
+            # Tool completed
+            elif event_type == "tool_end":
+
+                tool_name = event["name"]
+
+                status.write(
+                    f"✅ **Tool completed:** `{tool_name}`"
+                )
+
+                with st.expander(
+                    f"Result — {tool_name}"
+                ):
+                    st.code(
+                        event["content"],
+                        language="text"
+                    )
+
+            # Assistant response token
+            elif event_type == "token":
+
+                response_text += event["content"]
+
+                display_text = clean_response(response_text)
+                safe_text = html.escape(display_text)
+
+                placeholder.markdown(
+                    f'<div class="bubble-row assistant">'
+                    f'<div class="bubble assistant">{safe_text}</div>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+
+            # Error
+            elif event_type == "error":
+
+                failed = True
+
+                status.update(
+                    label="Something went wrong",
+                    state="error",
+                    expanded=True
+                )
+
+                status.write(event["content"])
+
+                if not response_text:
+                    response_text = (
+                        "Something went wrong while processing "
+                        "your request. Please try again."
+                    )
+
+                    placeholder.markdown(
+                        f'<div class="bubble-row assistant">'
+                        f'<div class="bubble assistant">'
+                        f'{html.escape(response_text)}'
+                        f'</div></div>',
+                        unsafe_allow_html=True,
+                    )
+
+                break
+
+        if not failed:
+
+            status.update(
+                label="Response completed",
+                state="complete",
+                expanded=False
+            )
+
+    return clean_response(response_text)
 
 
 # ==========================================
@@ -370,7 +576,10 @@ async def execute_command(command, current_thread_id):
 
                 history = ["### Saved conversations"]
 
-                for index, thread_id in enumerate(thread_ids, start=1):
+                for index, thread_id in enumerate(
+                    thread_ids,
+                    start=1
+                ):
 
                     config = {
                         "configurable": {
@@ -438,7 +647,10 @@ async def execute_command(command, current_thread_id):
             # FORGET CONVERSATION
             elif action == "/forget":
 
-                target_id = argument if argument else current_thread_id
+                target_id = (
+                    argument if argument
+                    else current_thread_id
+                )
 
                 if target_id not in thread_ids:
 
@@ -550,14 +762,20 @@ with st.sidebar:
         f"Current ID: {st.session_state.thread_id}"
     )
 
-    if st.button("🆕 New conversation", use_container_width=True):
+    if st.button(
+        "🆕 New conversation",
+        use_container_width=True
+    ):
 
         st.session_state.thread_id = new_thread_id()
         st.session_state.messages = []
         st.session_state.notice = "Started a new conversation."
         st.rerun()
 
-    if st.button("🗑️ Clear conversation", use_container_width=True):
+    if st.button(
+        "🗑️ Clear conversation",
+        use_container_width=True
+    ):
 
         st.session_state.thread_id = new_thread_id()
         st.session_state.messages = []

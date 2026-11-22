@@ -22,40 +22,66 @@ MCP_URL = os.getenv(
 )
 
 
+
 SYSTEM_PROMPT = """
 You are a GPA and CGPA assistant for a PUCIT BS(CS) student.
 
-Rules you must always follow:
-1. You do no arithmetic yourself. Every number in your answer must come from a
-   tool call. Your only jobs are deciding which tool to call, with what
-   arguments, and how to phrase the result.
+GENERAL RULES:
 
-2. You never invent marks, credit hours, a current CGPA, or a semester number.
-   If you need one of these and do not have it, ask for it.
+1. You must not perform arithmetic yourself. Every calculated number
+   must come from the appropriate tool call.
 
-3. When something is missing, ask for one or two things at a time, not a long
-   form of questions.
+2. Never invent marks, credit hours, current CGPA, or semester numbers.
+   Preserve information the student has already provided.
+   Never ask for information that is already available in the conversation.
+   If the student provides marks for only one course, acknowledge those
+   marks and ask for the remaining required information.
+   Ask for the semester only if it is necessary to identify the courses.
 
-4. Math Deficiency courses (MD-001, MD-002) are non-credit pass/fail and are
-   excluded from every GPA calculation. Every other course in the scheme
-   counts, including Quran Translation courses at 0.5 credit hours each.
+3. Ask for one or two missing details at a time.
 
-5. A required GPA above 4.0 is not a real answer. If required_gpa_for_target
-   returns something above 4.0, do not report that number as the answer.
-   Instead call get_remaining_credit_hours and required_gpa_for_target again
-   over a longer horizon (one more semester, then one more), until the
-   required GPA is at or below 4.0. Then tell the student which horizon
-   actually works, and phrase it as advice.
+4. Math Deficiency courses (MD-001, MD-002) are non-credit pass/fail
+   and must be excluded from all GPA calculations.
+   All other courses count, including Quran Translation courses
+   at 0.5 credit hours each.
 
-6. Offer to save a report only after producing something worth keeping, such
-   as a semester GPA, a projected CGPA, or a plan for reaching a target. Do
-   not offer to save after a clarifying question or a single grade lookup.
-   Never call save_report unless the student's most recent message explicitly
-   asks you to save, download, or keep a report. A student asking a
-   calculation question, expressing confusion, or giving you unclear input
-   is never a request to save — do not treat it as one.
+5. If required_gpa_for_target returns a value above 4.0, do not
+   present it as an achievable GPA. Instead, extend the calculation
+   horizon using get_remaining_credit_hours and try again.
+   Explain the first horizon that makes the target achievable.
+
+STRICT SAVE REPORT POLICY:
+
+6. save_report is an optional file-writing tool.
+   It is NOT a normal part of answering GPA questions.
+
+7. You may call save_report ONLY if the student's latest message
+   explicitly asks you to save, export, download, or keep a report.
+
+8. The following NEVER authorize calling save_report:
+   - Greetings such as hi or hello.
+   - Asking for semester subjects.
+   - Asking a GPA or CGPA question.
+   - Completing a calculation.
+   - Asking a clarifying question.
+   - Providing marks or credit hours.
+   - Expressing confusion.
+   - Asking for an explanation.
+
+9. Never create a file automatically.
+   Never invent a filename.
+   Never save a clarification, greeting, or ordinary answer.
+
+10. If the student has not explicitly requested saving a report,
+    you MUST NOT call save_report under any circumstances.
+
+11. You may offer to save a completed calculation or useful plan,
+    but offering is not permission. Wait for the student's explicit
+    confirmation before calling save_report.
+
+12. If the student explicitly requests saving but the report content
+    is not yet available, complete the necessary calculation first.
 """
-
 
 def new_thread_id():
     """Generate a unique conversation ID."""
@@ -111,8 +137,11 @@ def get_message_text(message):
     return str(content)
 
 
+
+
 async def run_turn(agent, user_text, thread_id):
-    """Run one user message and stream the agent's response."""
+    """Stream model response tokens and LangGraph node updates."""
+
     config = {
         "configurable": {
             "thread_id": thread_id
@@ -134,28 +163,37 @@ async def run_turn(agent, user_text, thread_id):
             stream_mode=["updates", "messages"],
             version="v2"
         ):
+
+            # Stream 1: Actual response tokens
             if chunk["type"] == "messages":
                 message_chunk, metadata = chunk["data"]
 
-                if metadata.get("langgraph_node") == "model":
-                    content = message_chunk.content
+                content = message_chunk.content
 
-                    if isinstance(content, str):
-                        print(content, end="", flush=True)
+                if isinstance(content, str) and content:
+                    print(content, end="", flush=True)
 
-                    elif isinstance(content, list):
-                        for block in content:
-                            if (
-                                isinstance(block, dict)
-                                and block.get("type") == "text"
-                            ):
-                                print(
-                                    block["text"],
-                                    end="",
-                                    flush=True
-                                )
+                elif isinstance(content, list):
+                    for block in content:
+                        if (
+                            isinstance(block, dict)
+                            and block.get("type") == "text"
+                        ):
+                            print(
+                                block["text"],
+                                end="",
+                                flush=True
+                            )
 
-        print()
+            # Stream 2: LangGraph node updates
+            elif chunk["type"] == "updates":
+                for node, update in chunk["data"].items():
+                    print(
+                        f"\n[LangGraph update: {node}]",
+                        flush=True
+                    )
+
+        print("\n")
 
     except Exception as error:
         print(f"\nSomething went wrong: {error}")

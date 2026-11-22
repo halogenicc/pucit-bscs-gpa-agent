@@ -214,19 +214,32 @@ def get_remaining_credit_hours(current_semester: int, through_semester: int = 8)
     return round(total_credit_hours, 2)
 
 #write report
+
 @tool
 def save_report(filename: str, content: str) -> str:
-    """Use this to save a summary of a completed GPA or CGPA calculation to a
-    text file, only after the student has asked you to save it.
+    """Save a GPA/CGPA report to a text file.
 
-    Never call this after just a clarifying question or a single grade lookup.
+    STRICT RULES:
+    - Call this tool ONLY when the student explicitly asks to save,
+      export, or write their report to a file.
+    - A greeting such as "hi" or "hello" NEVER authorizes this tool.
+    - Asking a GPA question NEVER authorizes this tool.
+    - Completing a calculation NEVER authorizes this tool.
+    - Asking a clarifying question NEVER authorizes this tool.
+    - Never create clarification.txt or any other file automatically.
+    - If the student has not explicitly requested saving, DO NOT call
+      this tool.
     """
     if not filename.strip():
         return "Error: filename cannot be empty"
+
     safe_name = filename if filename.endswith(".txt") else filename + ".txt"
+
     with open(safe_name, "w") as file:
         file.write(content)
+
     return f"Saved report to {safe_name}"
+
 
 
 TOOLS = [
